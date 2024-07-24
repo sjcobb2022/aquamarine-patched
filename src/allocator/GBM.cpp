@@ -226,6 +226,8 @@ SP<CGBMAllocator> Aquamarine::CGBMAllocator::create(int drmfd_, Hyprutils::Memor
         return nullptr;
     }
 
+    backend_->log(AQ_LOG_TRACE, std::format("Creating a GBM allocator with drm fd {}", drmfd_));
+
     auto allocator = SP<CGBMAllocator>(new CGBMAllocator(drmfd_, backend_));
 
     if (!allocator->gbmDevice) {

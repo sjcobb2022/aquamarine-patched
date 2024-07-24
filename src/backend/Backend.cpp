@@ -154,8 +154,8 @@ bool Aquamarine::CBackend::start() {
                 log(AQ_LOG_CRITICAL, "Failed to create an allocator (reopenDRMNode failed)");
                 return false;
             }
-            log(AQ_LOG_TRACE, std::format("Assigning primary allocator with fd: {}", b->drmFD()));
-            primaryAllocator = CGBMAllocator::create(b->drmFD(), self);
+            log(AQ_LOG_TRACE, std::format("Assigning primary allocator with fd: {}", fd));
+            primaryAllocator = CGBMAllocator::create(fd, self);
             break;
         }
     }
@@ -281,6 +281,15 @@ int Aquamarine::CBackend::reopenDRMNode(int drmFD, bool allowRenderNode) {
         log(AQ_LOG_TRACE, std::format("lesseeID: {}, leaseFD: {}", lesseeID, leaseFD));
         if (leaseFD >= 0) {
             log(AQ_LOG_TRACE, std::format("leaseFD Passed: {}", leaseFD));
+            char* name = nullptr;
+            if (allowRenderNode)
+                name = drmGetRenderDeviceNameFromFd(leaseFD);
+
+            if(name) {
+              log(AQ_LOG_TRACE, std::format("Render device has name inside drmIsMaster: {}", name));
+            }
+
+            free(name);
             return leaseFD;
         } else if (leaseFD != -EINVAL && leaseFD != -EOPNOTSUPP) {
             log(AQ_LOG_ERROR, "reopenDRMNode: drmModeCreateLease failed");
