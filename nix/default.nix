@@ -19,6 +19,11 @@
   wayland-protocols,
   version ? "git",
   doCheck ? false,
+
+  ffmpeg,
+  libliftoff,
+  libpng,
+  libcap,
 }:
 stdenv.mkDerivation {
   pname = "aquamarine";
@@ -44,6 +49,11 @@ stdenv.mkDerivation {
     udev
     wayland
     wayland-protocols
+
+    libcap
+    ffmpeg
+    libliftoff
+    libpng
   ];
 
   depsBuildBuild = [
