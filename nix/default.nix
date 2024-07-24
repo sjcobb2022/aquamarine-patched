@@ -24,6 +24,8 @@
   libliftoff,
   libpng,
   libcap,
+  seatd,
+  xorg,
 }:
 stdenv.mkDerivation {
   pname = "aquamarine";
@@ -34,6 +36,7 @@ stdenv.mkDerivation {
     cmake
     hyprwayland-scanner
     pkg-config
+    hwdata
   ];
 
   buildInputs = [
@@ -54,10 +57,17 @@ stdenv.mkDerivation {
     ffmpeg
     libliftoff
     libpng
+    seatd
+    xorg.libX11
+    xorg.xcbutilerrors
+    xorg.xcbutilimage
+    xorg.xcbutilrenderutil
+    xorg.xcbutilwm
   ];
 
   depsBuildBuild = [
     hwdata
+    pkgs-config
   ];
 
   outputs = ["out" "dev"];
