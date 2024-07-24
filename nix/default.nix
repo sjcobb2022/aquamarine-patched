@@ -67,7 +67,7 @@ stdenv.mkDerivation {
 
   depsBuildBuild = [
     hwdata
-    pkgs-config
+    pkg-config
   ];
 
   outputs = ["out" "dev"];
