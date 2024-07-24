@@ -154,8 +154,8 @@ bool Aquamarine::CBackend::start() {
                 log(AQ_LOG_CRITICAL, "Failed to create an allocator (reopenDRMNode failed)");
                 return false;
             }
-            log(AQ_LOG_TRACE, std::format("Assigning primary allocator with fd: {}", fd));
-            primaryAllocator = CGBMAllocator::create(fd, self);
+            log(AQ_LOG_TRACE, std::format("Assigning primary allocator with fd: {}", b->drmFD()));
+            primaryAllocator = CGBMAllocator::create(b->drmFD(), self);
             break;
         }
     }
