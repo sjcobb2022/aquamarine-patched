@@ -241,6 +241,9 @@ SP<CGBMAllocator> Aquamarine::CGBMAllocator::create(int drmfd_, Hyprutils::Memor
 }
 
 Aquamarine::CGBMAllocator::CGBMAllocator(int fd_, Hyprutils::Memory::CWeakPointer<CBackend> backend_) : fd(fd_), backend(backend_) {
+
+    backend_->log(AQ_LOG_DEBUG, std::format("Creating a GBM allocator with fd {}", fd_));
+
     gbmDevice = gbm_create_device(fd_);
     if (!gbmDevice) {
         backend->log(AQ_LOG_ERROR, std::format("Couldn't open a GBM device at fd {}", fd_));

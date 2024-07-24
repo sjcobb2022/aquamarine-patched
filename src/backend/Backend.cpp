@@ -147,12 +147,14 @@ bool Aquamarine::CBackend::start() {
     // TODO: obviously change this when (if) we add different allocators.
     for (auto& b : implementations) {
         if (b->drmFD() >= 0) {
+            log(AQ_LOG_TRACE, std::format("Opening DRM node: {}", b->drmFD()));
             auto fd = reopenDRMNode(b->drmFD());
             if (fd < 0) {
                 // this is critical, we cannot create an allocator properly
                 log(AQ_LOG_CRITICAL, "Failed to create an allocator (reopenDRMNode failed)");
                 return false;
             }
+            log(AQ_LOG_TRACE, std::format("Assigning primary allocator with fd: {}", fd));
             primaryAllocator = CGBMAllocator::create(fd, self);
             break;
         }
@@ -276,7 +278,9 @@ int Aquamarine::CBackend::reopenDRMNode(int drmFD, bool allowRenderNode) {
         // Only recent kernels support empty leases
         uint32_t lesseeID = 0;
         int      leaseFD  = drmModeCreateLease(drmFD, nullptr, 0, O_CLOEXEC, &lesseeID);
+        log(AQ_LOG_TRACE, std::format("lesseeID: {}, leaseFD: {}", lesseeID, leaseFD));
         if (leaseFD >= 0) {
+            log(AQ_LOG_TRACE, std::format("leaseFD Passed: {}", leaseFD));
             return leaseFD;
         } else if (leaseFD != -EINVAL && leaseFD != -EOPNOTSUPP) {
             log(AQ_LOG_ERROR, "reopenDRMNode: drmModeCreateLease failed");
@@ -289,7 +293,14 @@ int Aquamarine::CBackend::reopenDRMNode(int drmFD, bool allowRenderNode) {
     if (allowRenderNode)
         name = drmGetRenderDeviceNameFromFd(drmFD);
 
+    if(name) {
+      log(AQ_LOG_TRACE, std::format("Render device has name: {}", name));
+    }
+
     if (!name) {
+        
+        log(AQ_LOG_TRACE, "Render Device is primary or without name.");
+
         // primary node or no name
         name = drmGetDeviceNameFromFd2(drmFD);
 
