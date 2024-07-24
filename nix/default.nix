@@ -19,13 +19,6 @@
   wayland-protocols,
   version ? "git",
   doCheck ? false,
-
-  ffmpeg,
-  libliftoff,
-  libpng,
-  libcap,
-  seatd,
-  xorg,
 }:
 stdenv.mkDerivation {
   pname = "aquamarine";
@@ -36,7 +29,6 @@ stdenv.mkDerivation {
     cmake
     hyprwayland-scanner
     pkg-config
-    hwdata
   ];
 
   buildInputs = [
@@ -52,22 +44,10 @@ stdenv.mkDerivation {
     udev
     wayland
     wayland-protocols
-
-    libcap
-    ffmpeg
-    libliftoff
-    libpng
-    seatd
-    xorg.libX11
-    xorg.xcbutilerrors
-    xorg.xcbutilimage
-    xorg.xcbutilrenderutil
-    xorg.xcbutilwm
   ];
 
   depsBuildBuild = [
     hwdata
-    pkg-config
   ];
 
   outputs = ["out" "dev"];
