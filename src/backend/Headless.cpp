@@ -10,7 +10,7 @@ using namespace Hyprutils::Memory;
 using namespace Hyprutils::Math;
 #define SP CSharedPointer
 
-#define TIMESPEC_NSEC_PER_SEC 1000000000L
+#define TIMESPEC_NSEC_PER_SEC 1000000000LL
 
 static void timespecAddNs(timespec* pTimespec, int64_t delta) {
     int delta_ns_low = delta % TIMESPEC_NSEC_PER_SEC;
@@ -73,6 +73,7 @@ void Aquamarine::CHeadlessOutput::scheduleFrame(const scheduleFrameReason reason
 }
 
 bool Aquamarine::CHeadlessOutput::destroy() {
+    events.destroy.emit();
     std::erase(backend->outputs, self.lock());
     return true;
 }
@@ -148,7 +149,7 @@ void Aquamarine::CHeadlessBackend::dispatchTimers() {
         }
     }
 
-    for (auto& copy : toFire) {
+    for (auto const& copy : toFire) {
         if (copy.what)
             copy.what();
     }
@@ -161,7 +162,7 @@ void Aquamarine::CHeadlessBackend::updateTimerFD() {
     const auto clocknow = std::chrono::steady_clock::now();
     bool       any      = false;
 
-    for (auto& t : timers.timers) {
+    for (auto const& t : timers.timers) {
         auto delta = std::chrono::duration_cast<std::chrono::microseconds>(t.when - clocknow).count() * 1000 /* µs -> ns */;
 
         if (delta < lowestNs)

@@ -3,6 +3,7 @@
 #include <xf86drmMode.h>
 #include <cstring>
 #include <fcntl.h>
+#include <unistd.h>
 #include "Math.hpp"
 #include "Shared.hpp"
 #include "FormatUtils.hpp"
@@ -155,7 +156,7 @@ bool CDRMRenderer::initDRMFormats() {
 
     std::vector<SGLFormat> dmaFormats;
 
-    for (auto& fmt : formats) {
+    for (auto const& fmt : formats) {
         std::vector<std::pair<uint64_t, bool>> mods;
 
         auto                                   ret = getModsForFormat(fmt);
@@ -169,7 +170,7 @@ bool CDRMRenderer::initDRMFormats() {
         // EGL can always do implicit modifiers.
         mods.push_back({DRM_FORMAT_MOD_INVALID, true});
 
-        for (auto& [mod, external] : mods) {
+        for (auto const& [mod, external] : mods) {
             dmaFormats.push_back(SGLFormat{
                 .drmFormat = (uint32_t)fmt,
                 .modifier  = mod,
@@ -178,7 +179,7 @@ bool CDRMRenderer::initDRMFormats() {
         }
 
         TRACE(backend->log(AQ_LOG_TRACE, std::format("EGL: GPU Supports Format {} (0x{:x})", fourccToName((uint32_t)fmt), fmt)));
-        for (auto& [mod, external] : mods) {
+        for (auto const& [mod, external] : mods) {
             auto modName = drmGetFormatModifierName(mod);
             TRACE(backend->log(AQ_LOG_TRACE, std::format("EGL:  | {}with modifier 0x{:x}: {}", (external ? "external only " : ""), mod, modName ? modName : "?unknown?")));
             free(modName);
@@ -223,6 +224,20 @@ SP<CDRMRenderer> CDRMRenderer::attempt(Hyprutils::Memory::CSharedPointer<CGBMAll
     loadGLProc(&renderer->egl.glEGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferStorageOES");
     loadGLProc(&renderer->egl.eglQueryDmaBufFormatsEXT, "eglQueryDmaBufFormatsEXT");
     loadGLProc(&renderer->egl.eglQueryDmaBufModifiersEXT, "eglQueryDmaBufModifiersEXT");
+    loadGLProc(&renderer->egl.eglDestroySyncKHR, "eglDestroySyncKHR");
+    loadGLProc(&renderer->egl.eglWaitSyncKHR, "eglWaitSyncKHR");
+    loadGLProc(&renderer->egl.eglCreateSyncKHR, "eglCreateSyncKHR");
+    loadGLProc(&renderer->egl.eglDupNativeFenceFDANDROID, "eglDupNativeFenceFDANDROID");
+
+    if (!renderer->egl.eglCreateSyncKHR) {
+        backend_->log(AQ_LOG_ERROR, "CDRMRenderer: fail, no eglCreateSyncKHR");
+        return nullptr;
+    }
+
+    if (!renderer->egl.eglDupNativeFenceFDANDROID) {
+        backend_->log(AQ_LOG_ERROR, "CDRMRenderer: fail, no eglDupNativeFenceFDANDROID");
+        return nullptr;
+    }
 
     if (!renderer->egl.eglGetPlatformDisplayEXT) {
         backend_->log(AQ_LOG_ERROR, "CDRMRenderer: fail, no eglGetPlatformDisplayEXT");
@@ -440,7 +455,7 @@ SGLTex CDRMRenderer::glTex(Hyprutils::Memory::CSharedPointer<IBuffer> buffa) {
     }
 
     bool external = false;
-    for (auto& fmt : formats) {
+    for (auto const& fmt : formats) {
         if (fmt.drmFormat != dma.format || fmt.modifier != dma.modifier)
             continue;
 
@@ -469,12 +484,140 @@ inline const float fullVerts[] = {
     0, 1, // bottom left
 };
 
-bool CDRMRenderer::blit(SP<IBuffer> from, SP<IBuffer> to) {
+void CDRMRenderer::waitOnSync(int fd) {
+    TRACE(backend->log(AQ_LOG_TRACE, std::format("EGL (waitOnSync): attempting to wait on fd {}", fd)));
+
+    std::vector<EGLint> attribs;
+    int                 dupFd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (dupFd < 0) {
+        backend->log(AQ_LOG_TRACE, "EGL (waitOnSync): failed to dup fd for wait");
+        return;
+    }
+
+    attribs.push_back(EGL_SYNC_NATIVE_FENCE_FD_ANDROID);
+    attribs.push_back(dupFd);
+    attribs.push_back(EGL_NONE);
+
+    EGLSyncKHR sync = egl.eglCreateSyncKHR(egl.display, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs.data());
+    if (sync == EGL_NO_SYNC_KHR) {
+        TRACE(backend->log(AQ_LOG_TRACE, "EGL (waitOnSync): failed to create an egl sync for explicit"));
+        if (dupFd >= 0)
+            close(dupFd);
+        return;
+    }
+
+    // we got a sync, now we just tell egl to wait before sampling
+    if (egl.eglWaitSyncKHR(egl.display, sync, 0) != EGL_TRUE) {
+        if (egl.eglDestroySyncKHR(egl.display, sync) != EGL_TRUE)
+            TRACE(backend->log(AQ_LOG_TRACE, "EGL (waitOnSync): failed to destroy sync"));
+
+        TRACE(backend->log(AQ_LOG_TRACE, "EGL (waitOnSync): failed to wait on the sync object"));
+        return;
+    }
+
+    if (egl.eglDestroySyncKHR(egl.display, sync) != EGL_TRUE)
+        TRACE(backend->log(AQ_LOG_TRACE, "EGL (waitOnSync): failed to destroy sync"));
+}
+
+int CDRMRenderer::recreateBlitSync() {
+    TRACE(backend->log(AQ_LOG_TRACE, "EGL (recreateBlitSync): recreating blit sync"));
+
+    if (egl.lastBlitSync) {
+        TRACE(backend->log(AQ_LOG_TRACE, std::format("EGL (recreateBlitSync): cleaning up old sync (fd {})", egl.lastBlitSyncFD)));
+
+        // cleanup last sync
+        if (egl.eglDestroySyncKHR(egl.display, egl.lastBlitSync) != EGL_TRUE)
+            TRACE(backend->log(AQ_LOG_TRACE, "EGL (recreateBlitSync): failed to destroy old sync"));
+
+        if (egl.lastBlitSyncFD >= 0)
+            close(egl.lastBlitSyncFD);
+
+        egl.lastBlitSyncFD = -1;
+        egl.lastBlitSync   = nullptr;
+    }
+
+    EGLSyncKHR sync = egl.eglCreateSyncKHR(egl.display, EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr);
+    if (sync == EGL_NO_SYNC_KHR) {
+        TRACE(backend->log(AQ_LOG_TRACE, "EGL (recreateBlitSync): failed to create an egl sync for explicit"));
+        return -1;
+    }
+
+    // we need to flush otherwise we might not get a valid fd
+    glFlush();
+
+    int fd = egl.eglDupNativeFenceFDANDROID(egl.display, sync);
+    if (fd == EGL_NO_NATIVE_FENCE_FD_ANDROID) {
+        TRACE(backend->log(AQ_LOG_TRACE, "EGL (recreateBlitSync): failed to dup egl fence fd"));
+        if (egl.eglDestroySyncKHR(egl.display, sync) != EGL_TRUE)
+            TRACE(backend->log(AQ_LOG_TRACE, "EGL (recreateBlitSync): failed to destroy new sync"));
+        return -1;
+    }
+
+    egl.lastBlitSync   = sync;
+    egl.lastBlitSyncFD = fd;
+
+    TRACE(backend->log(AQ_LOG_TRACE, std::format("EGL (recreateBlitSync): success, new fence exported with fd {}", fd)));
+
+    return fd;
+}
+
+void CDRMRenderer::clearBuffer(IBuffer* buf) {
+    setEGL();
+
+    auto   dmabuf = buf->dmabuf();
+    GLuint rboID = 0, fboID = 0;
+
+    if (!dmabuf.success) {
+        backend->log(AQ_LOG_ERROR, "EGL (clear): cannot clear a non-dmabuf");
+        return;
+    }
+
+    auto rboImage = createEGLImage(dmabuf);
+    if (rboImage == EGL_NO_IMAGE_KHR) {
+        backend->log(AQ_LOG_ERROR, std::format("EGL (clear): createEGLImage failed: {}", eglGetError()));
+        return;
+    }
+
+    GLCALL(glGenRenderbuffers(1, &rboID));
+    GLCALL(glBindRenderbuffer(GL_RENDERBUFFER, rboID));
+    GLCALL(egl.glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, (GLeglImageOES)rboImage));
+    GLCALL(glBindRenderbuffer(GL_RENDERBUFFER, 0));
+
+    GLCALL(glGenFramebuffers(1, &fboID));
+    GLCALL(glBindFramebuffer(GL_FRAMEBUFFER, fboID));
+    GLCALL(glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rboID));
+
+    GLCALL(glBindRenderbuffer(GL_RENDERBUFFER, rboID));
+    GLCALL(glBindFramebuffer(GL_FRAMEBUFFER, fboID));
+
+    TRACE(backend->log(AQ_LOG_TRACE, std::format("EGL (clear): fbo {} rbo {}", fboID, rboID)));
+
+    glClearColor(0.F, 0.F, 0.F, 1.F);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glFlush();
+
+    GLCALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+    GLCALL(glBindRenderbuffer(GL_RENDERBUFFER, 0));
+
+    glDeleteFramebuffers(1, &fboID);
+    glDeleteRenderbuffers(1, &rboID);
+    egl.eglDestroyImageKHR(egl.display, rboImage);
+
+    restoreEGL();
+}
+
+CDRMRenderer::SBlitResult CDRMRenderer::blit(SP<IBuffer> from, SP<IBuffer> to, int waitFD) {
     setEGL();
 
     if (from->dmabuf().size != to->dmabuf().size) {
         backend->log(AQ_LOG_ERROR, "EGL (blit): buffer sizes mismatched");
-        return false;
+        return {};
+    }
+
+    if (waitFD >= 0) {
+        // wait on a provided explicit fence
+        waitOnSync(waitFD);
     }
 
     // firstly, get a texture from the from buffer
@@ -514,7 +657,7 @@ bool CDRMRenderer::blit(SP<IBuffer> from, SP<IBuffer> to) {
 
     if (!verifyDestinationDMABUF(toDma)) {
         backend->log(AQ_LOG_ERROR, "EGL (blit): failed to blit: destination dmabuf unsupported");
-        return false;
+        return {};
     }
 
     {
@@ -533,7 +676,7 @@ bool CDRMRenderer::blit(SP<IBuffer> from, SP<IBuffer> to) {
             rboImage = createEGLImage(toDma);
             if (rboImage == EGL_NO_IMAGE_KHR) {
                 backend->log(AQ_LOG_ERROR, std::format("EGL (blit): createEGLImage failed: {}", eglGetError()));
-                return false;
+                return {};
             }
 
             GLCALL(glGenRenderbuffers(1, &rboID));
@@ -547,7 +690,7 @@ bool CDRMRenderer::blit(SP<IBuffer> from, SP<IBuffer> to) {
 
             if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
                 backend->log(AQ_LOG_ERROR, std::format("EGL (blit): glCheckFramebufferStatus failed: {}", glGetError()));
-                return false;
+                return {};
             }
 
             // should never remove anything, but JIC. We'll leak an RBO and FBO if this removes anything.
@@ -623,15 +766,19 @@ bool CDRMRenderer::blit(SP<IBuffer> from, SP<IBuffer> to) {
     GLCALL(glBindTexture(fromTex.target, 0));
 
     // rendered, cleanup
-
     glFlush();
+
+    // get an explicit sync fd for the secondary gpu.
+    // when we pass buffers between gpus we should always use explicit sync,
+    // as implicit is not guaranteed at all
+    int explicitFD = recreateBlitSync();
 
     GLCALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
     GLCALL(glBindRenderbuffer(GL_RENDERBUFFER, 0));
 
     restoreEGL();
 
-    return true;
+    return {true, explicitFD == -1 ? std::nullopt : std::optional<int>{explicitFD}};
 }
 
 void CDRMRenderer::onBufferAttachmentDrop(CDRMRendererBufferAttachment* attachment) {
@@ -655,7 +802,7 @@ void CDRMRenderer::onBufferAttachmentDrop(CDRMRendererBufferAttachment* attachme
 }
 
 bool CDRMRenderer::verifyDestinationDMABUF(const SDMABUFAttrs& attrs) {
-    for (auto& fmt : formats) {
+    for (auto const& fmt : formats) {
         if (fmt.drmFormat != attrs.format)
             continue;
 

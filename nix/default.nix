@@ -17,6 +17,7 @@
   udev,
   wayland,
   wayland-protocols,
+  wayland-scanner,
   version ? "git",
   doCheck ? false,
 }:
@@ -25,13 +26,21 @@ stdenv.mkDerivation {
   inherit version doCheck;
   src = ../.;
 
+  strictDeps = true;
+
+  depsBuildBuild = [
+    pkg-config
+  ];
+
   nativeBuildInputs = [
     cmake
     hyprwayland-scanner
     pkg-config
+    wayland-scanner
   ];
 
   buildInputs = [
+    hwdata
     hyprutils
     libdisplay-info
     libdrm
@@ -44,10 +53,6 @@ stdenv.mkDerivation {
     udev
     wayland
     wayland-protocols
-  ];
-
-  depsBuildBuild = [
-    hwdata
   ];
 
   outputs = ["out" "dev"];

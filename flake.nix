@@ -31,6 +31,12 @@
         localSystem.system = system;
         overlays = with self.overlays; [aquamarine];
       });
+    pkgsCrossFor = eachSystem (system: crossSystem:
+      import nixpkgs {
+        localSystem = system;
+        crossSystem = crossSystem;
+        overlays = with self.overlays; [aquamarine];
+      });
     mkDate = longDate: (lib.concatStringsSep "-" [
       (builtins.substring 0 4 longDate)
       (builtins.substring 4 2 longDate)
@@ -42,7 +48,6 @@
       default = self.overlays.aquamarine;
 
       aquamarine = lib.composeManyExtensions [
-        self.overlays.libinput
         inputs.hyprutils.overlays.default
         inputs.hyprwayland-scanner.overlays.default
         (final: prev: {
@@ -53,25 +58,12 @@
           aquamarine-with-tests = final.aquamarine.override {doCheck = true;};
         })
       ];
-
-      libinput = final: prev: {
-        libinput = prev.libinput.overrideAttrs (self: super: {
-          version = "1.26.0";
-
-          src = final.fetchFromGitLab {
-            domain = "gitlab.freedesktop.org";
-            owner = "libinput";
-            repo = "libinput";
-            rev = self.version;
-            hash = "sha256-mlxw4OUjaAdgRLFfPKMZDMOWosW9yKAkzDccwuLGCwQ=";
-          };
-        });
-      };
     };
 
     packages = eachSystem (system: {
       default = self.packages.${system}.aquamarine;
       inherit (pkgsFor.${system}) aquamarine aquamarine-with-tests;
+      aquamarine-cross = (pkgsCrossFor.${system} "aarch64-linux").aquamarine;
     });
 
     formatter = eachSystem (system: pkgsFor.${system}.alejandra);

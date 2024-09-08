@@ -152,7 +152,7 @@ namespace Aquamarine {
     struct SDRMCRTC {
         uint32_t               id = 0;
         std::vector<SDRMLayer> layers;
-        int32_t                refresh = 0;
+        int32_t                refresh = 0; // unused
 
         struct {
             int gammaSize = 0;
@@ -194,7 +194,7 @@ namespace Aquamarine {
         virtual bool                                                      test();
         virtual Hyprutils::Memory::CSharedPointer<IBackendImplementation> getBackend();
         virtual bool                                                      setCursor(Hyprutils::Memory::CSharedPointer<IBuffer> buffer, const Hyprutils::Math::Vector2D& hotspot);
-        virtual void                                                      moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipShedule = false);
+        virtual void                                                      moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipSchedule = false);
         virtual void                                                      scheduleFrame(const scheduleFrameReason reason = AQ_SCHEDULE_UNKNOWN);
         virtual void                                                      setCursorVisible(bool visible);
         virtual Hyprutils::Math::Vector2D                                 cursorPlaneSize();
@@ -208,6 +208,8 @@ namespace Aquamarine {
         bool                                                              cursorVisible = true;
         Hyprutils::Math::Vector2D                                         cursorPos; // without hotspot
         Hyprutils::Math::Vector2D                                         cursorHotspot;
+
+        bool enabledState = true; // actual enabled state. Should be synced with state->state().enabled after a new frame
 
       private:
         CDRMOutput(const std::string& name_, Hyprutils::Memory::CWeakPointer<CDRMBackend> backend_, Hyprutils::Memory::CSharedPointer<SDRMConnector> connector_);
@@ -265,6 +267,7 @@ namespace Aquamarine {
         void                                           applyCommit(const SDRMConnectorCommitData& data);
         void                                           rollbackCommit(const SDRMConnectorCommitData& data);
         void                                           onPresent();
+        void                                           recheckCRTCProps();
 
         Hyprutils::Memory::CSharedPointer<CDRMOutput>  output;
         Hyprutils::Memory::CWeakPointer<CDRMBackend>   backend;
@@ -320,11 +323,12 @@ namespace Aquamarine {
 
     class IDRMImplementation {
       public:
+        virtual ~IDRMImplementation()                                                                                  = default;
         virtual bool commit(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, SDRMConnectorCommitData& data) = 0;
         virtual bool reset()                                                                                           = 0;
 
         // moving a cursor IIRC is almost instant on most hardware so we don't have to wait for a commit.
-        virtual bool moveCursor(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, bool skipShedule = false) = 0;
+        virtual bool moveCursor(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, bool skipSchedule = false) = 0;
     };
 
     class CDRMBackend : public IBackendImplementation {
@@ -363,7 +367,7 @@ namespace Aquamarine {
         bool initMgpu();
         bool grabFormats();
         bool shouldBlit();
-        void scanConnectors();
+        void scanConnectors(bool allowConnect = true);
         void scanLeases();
         void restoreAfterVT();
         void recheckCRTCs();
@@ -373,11 +377,10 @@ namespace Aquamarine {
         Hyprutils::Memory::CSharedPointer<IDRMImplementation> impl;
         Hyprutils::Memory::CWeakPointer<CDRMBackend>          primary;
 
-        // multigpu state, only present if this backend is not primary, aka if this->primary != nullptr
         struct {
             Hyprutils::Memory::CSharedPointer<IAllocator>   allocator;
-            Hyprutils::Memory::CSharedPointer<CDRMRenderer> renderer;
-        } mgpu;
+            Hyprutils::Memory::CSharedPointer<CDRMRenderer> renderer; // may be null if creation fails
+        } rendererState;
 
         Hyprutils::Memory::CWeakPointer<CBackend>                     backend;
 
@@ -414,5 +417,6 @@ namespace Aquamarine {
         friend class CDRMAtomicImpl;
         friend class CDRMAtomicRequest;
         friend class CDRMLease;
+        friend class CGBMBuffer;
     };
 };

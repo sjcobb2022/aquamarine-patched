@@ -1,17 +1,19 @@
 #include <aquamarine/allocator/GBM.hpp>
 #include <aquamarine/backend/Backend.hpp>
+#include <aquamarine/backend/DRM.hpp>
 #include <aquamarine/allocator/Swapchain.hpp>
 #include "FormatUtils.hpp"
 #include "Shared.hpp"
 #include <xf86drm.h>
 #include <gbm.h>
 #include <unistd.h>
+#include "../backend/drm/Renderer.hpp"
 
 using namespace Aquamarine;
 using namespace Hyprutils::Memory;
 #define SP CSharedPointer
 
-static SDRMFormat guessFormatFrom(std::vector<SDRMFormat> formats, bool cursor) {
+static SDRMFormat guessFormatFrom(std::vector<SDRMFormat> formats, bool cursor, bool scanout) {
     if (formats.empty())
         return SDRMFormat{};
 
@@ -20,20 +22,29 @@ static SDRMFormat guessFormatFrom(std::vector<SDRMFormat> formats, bool cursor) 
             Try to find 10bpp formats first, as they offer better color precision.
             For cursors, don't, as these almost never support that.
         */
-        if (auto it = std::find_if(formats.begin(), formats.end(), [](const auto& f) { return f.drmFormat == DRM_FORMAT_ARGB2101010; }); it != formats.end())
-            return *it;
+        if (!scanout) {
+            if (auto it =
+                    std::find_if(formats.begin(), formats.end(), [](const auto& f) { return f.drmFormat == DRM_FORMAT_ARGB2101010 || f.drmFormat == DRM_FORMAT_ABGR2101010; });
+                it != formats.end())
+                return *it;
+        }
 
-        if (auto it = std::find_if(formats.begin(), formats.end(), [](const auto& f) { return f.drmFormat == DRM_FORMAT_XRGB2101010; }); it != formats.end())
+        if (auto it = std::find_if(formats.begin(), formats.end(), [](const auto& f) { return f.drmFormat == DRM_FORMAT_XRGB2101010 || f.drmFormat == DRM_FORMAT_XBGR2101010; });
+            it != formats.end())
             return *it;
     }
 
-    if (auto it = std::find_if(formats.begin(), formats.end(), [](const auto& f) { return f.drmFormat == DRM_FORMAT_ARGB8888; }); it != formats.end())
+    if (!scanout || cursor /* don't set opaque for cursor plane */) {
+        if (auto it = std::find_if(formats.begin(), formats.end(), [](const auto& f) { return f.drmFormat == DRM_FORMAT_ARGB8888 || f.drmFormat == DRM_FORMAT_ABGR8888; });
+            it != formats.end())
+            return *it;
+    }
+
+    if (auto it = std::find_if(formats.begin(), formats.end(), [](const auto& f) { return f.drmFormat == DRM_FORMAT_XRGB8888 || f.drmFormat == DRM_FORMAT_XBGR8888; });
+        it != formats.end())
         return *it;
 
-    if (auto it = std::find_if(formats.begin(), formats.end(), [](const auto& f) { return f.drmFormat == DRM_FORMAT_XRGB8888; }); it != formats.end())
-        return *it;
-
-    for (auto& f : formats) {
+    for (auto const& f : formats) {
         auto name = fourccToName(f.drmFormat);
 
         /* 10 bpp RGB */
@@ -41,7 +52,7 @@ static SDRMFormat guessFormatFrom(std::vector<SDRMFormat> formats, bool cursor) 
             return f;
     }
 
-    for (auto& f : formats) {
+    for (auto const& f : formats) {
         auto name = fourccToName(f.drmFormat);
 
         /* 8 bpp RGB */
@@ -61,20 +72,28 @@ Aquamarine::CGBMBuffer::CGBMBuffer(const SAllocatorBufferParams& params, Hypruti
     attrs.format = params.format;
     size         = attrs.size;
 
-    const bool CURSOR   = params.cursor && params.scanout;
-    const bool MULTIGPU = params.multigpu && params.scanout;
+    const bool CURSOR           = params.cursor && params.scanout;
+    const bool MULTIGPU         = params.multigpu && params.scanout;
+    const bool EXPLICIT_SCANOUT = params.scanout && swapchain->currentOptions().scanoutOutput;
 
     TRACE(allocator->backend->log(AQ_LOG_TRACE,
-                                  std::format("GBM: Allocating a buffer: size {}, format {}, cursor: {}, multigpu: {}", attrs.size, fourccToName(attrs.format), CURSOR, MULTIGPU)));
+                                  std::format("GBM: Allocating a buffer: size {}, format {}, cursor: {}, multigpu: {}, scanout: {}", attrs.size, fourccToName(attrs.format), CURSOR,
+                                              MULTIGPU, params.scanout)));
 
-    const auto            FORMATS = CURSOR ?
-                   swapchain->backendImpl->getCursorFormats() :
-                   (swapchain->backendImpl->getRenderableFormats().size() == 0 ? swapchain->backendImpl->getRenderFormats() : swapchain->backendImpl->getRenderableFormats());
+    if (EXPLICIT_SCANOUT)
+        TRACE(allocator->backend->log(
+            AQ_LOG_TRACE, std::format("GBM: Explicit scanout output, output has {} explicit formats", swapchain->currentOptions().scanoutOutput->getRenderFormats().size())));
+
+    const auto FORMATS    = CURSOR ? swapchain->backendImpl->getCursorFormats() :
+                                     (EXPLICIT_SCANOUT ? swapchain->currentOptions().scanoutOutput->getRenderFormats() : swapchain->backendImpl->getRenderFormats());
+    const auto RENDERABLE = swapchain->backendImpl->getRenderableFormats();
+
+    TRACE(allocator->backend->log(AQ_LOG_TRACE, std::format("GBM: Available formats: {}", FORMATS.size())));
 
     std::vector<uint64_t> explicitModifiers;
 
     if (attrs.format == DRM_FORMAT_INVALID) {
-        attrs.format = guessFormatFrom(FORMATS, CURSOR).drmFormat;
+        attrs.format = guessFormatFrom(FORMATS, CURSOR, params.scanout).drmFormat;
         if (attrs.format != DRM_FORMAT_INVALID)
             allocator->backend->log(AQ_LOG_DEBUG, std::format("GBM: Automatically selected format {} for new GBM buffer", fourccToName(attrs.format)));
     }
@@ -86,15 +105,34 @@ Aquamarine::CGBMBuffer::CGBMBuffer(const SAllocatorBufferParams& params, Hypruti
 
     // check if we can use modifiers. If the requested support has any explicit modifier
     // supported by the primary backend, we can.
-    for (auto& f : FORMATS) {
-        if (f.drmFormat != attrs.format)
-            continue;
+    if (!RENDERABLE.empty()) {
+        TRACE(allocator->backend->log(AQ_LOG_TRACE, std::format("GBM: Renderable has {} formats, clipping", RENDERABLE.size())));
 
-        for (auto& m : f.modifiers) {
-            if (m == DRM_FORMAT_MOD_INVALID)
+        for (auto const& f : FORMATS) {
+            if (f.drmFormat != attrs.format)
                 continue;
 
-            explicitModifiers.push_back(m);
+            for (auto const& m : f.modifiers) {
+                if (m == DRM_FORMAT_MOD_INVALID)
+                    continue;
+
+                if (params.scanout && !CURSOR && !MULTIGPU) {
+                    // regular scanout plane, check if the format is renderable
+                    auto rformat = std::find_if(RENDERABLE.begin(), RENDERABLE.end(), [f](const auto& e) { return e.drmFormat == f.drmFormat; });
+
+                    if (rformat == RENDERABLE.end()) {
+                        TRACE(allocator->backend->log(AQ_LOG_TRACE, std::format("GBM: Dropping format {} as it's not renderable", fourccToName(f.drmFormat))));
+                        break;
+                    }
+
+                    if (std::find(rformat->modifiers.begin(), rformat->modifiers.end(), m) == rformat->modifiers.end()) {
+                        TRACE(allocator->backend->log(AQ_LOG_TRACE, std::format("GBM: Dropping modifier 0x{:x} as it's not renderable", m)));
+                        continue;
+                    }
+                }
+
+                explicitModifiers.push_back(m);
+            }
         }
     }
 
@@ -113,18 +151,36 @@ Aquamarine::CGBMBuffer::CGBMBuffer(const SAllocatorBufferParams& params, Hypruti
     if (params.scanout)
         flags |= GBM_BO_USE_SCANOUT;
 
+    uint64_t modifier = DRM_FORMAT_MOD_INVALID;
+
     if (explicitModifiers.empty()) {
         allocator->backend->log(AQ_LOG_WARNING, "GBM: Using modifier-less allocation");
         bo = gbm_bo_create(allocator->gbmDevice, attrs.size.x, attrs.size.y, attrs.format, flags);
     } else {
         TRACE(allocator->backend->log(AQ_LOG_TRACE, std::format("GBM: Using modifier-based allocation, modifiers: {}", explicitModifiers.size())));
-        for (auto& mod : explicitModifiers) {
+        for (auto const& mod : explicitModifiers) {
             TRACE(allocator->backend->log(AQ_LOG_TRACE, std::format("GBM: | mod 0x{:x}", mod)));
         }
         bo = gbm_bo_create_with_modifiers2(allocator->gbmDevice, attrs.size.x, attrs.size.y, attrs.format, explicitModifiers.data(), explicitModifiers.size(), flags);
 
-        if (!bo) {
-            allocator->backend->log(AQ_LOG_ERROR, "GBM: Allocating with modifiers failed, falling back to implicit");
+        if (!bo && CURSOR) {
+            // allow non-renderable cursor buffer for nvidia
+            allocator->backend->log(AQ_LOG_ERROR, "GBM: Allocating with modifiers and flags failed, falling back to modifiers without flags");
+            bo = gbm_bo_create_with_modifiers(allocator->gbmDevice, attrs.size.x, attrs.size.y, attrs.format, explicitModifiers.data(), explicitModifiers.size());
+        }
+
+        bool useLinear = explicitModifiers.size() == 1 && explicitModifiers[0] == DRM_FORMAT_MOD_LINEAR;
+        if (bo) {
+            modifier = gbm_bo_get_modifier(bo);
+            if (useLinear && modifier == DRM_FORMAT_MOD_INVALID)
+                modifier = DRM_FORMAT_MOD_LINEAR;
+        } else {
+            if (useLinear) {
+                flags |= GBM_BO_USE_LINEAR;
+                modifier = DRM_FORMAT_MOD_LINEAR;
+                allocator->backend->log(AQ_LOG_ERROR, "GBM: Allocating with modifiers failed, falling back to modifier-less allocation");
+            } else
+                allocator->backend->log(AQ_LOG_ERROR, "GBM: Allocating with modifiers failed, falling back to implicit");
             bo = gbm_bo_create(allocator->gbmDevice, attrs.size.x, attrs.size.y, attrs.format, flags);
         }
     }
@@ -135,7 +191,7 @@ Aquamarine::CGBMBuffer::CGBMBuffer(const SAllocatorBufferParams& params, Hypruti
     }
 
     attrs.planes   = gbm_bo_get_plane_count(bo);
-    attrs.modifier = gbm_bo_get_modifier(bo);
+    attrs.modifier = modifier;
 
     for (size_t i = 0; i < (size_t)attrs.planes; ++i) {
         attrs.strides.at(i) = gbm_bo_get_stride_for_plane(bo, i);
@@ -161,6 +217,13 @@ Aquamarine::CGBMBuffer::CGBMBuffer(const SAllocatorBufferParams& params, Hypruti
                                         modName ? modName : "Unknown"));
 
     free(modName);
+
+    if (params.scanout && swapchain->backendImpl->type() == AQ_BACKEND_DRM) {
+        // clear the buffer using the DRM renderer to avoid uninitialized mem
+        auto impl = (CDRMBackend*)swapchain->backendImpl.get();
+        if (impl->rendererState.renderer)
+            impl->rendererState.renderer->clearBuffer(this);
+    }
 }
 
 Aquamarine::CGBMBuffer::~CGBMBuffer() {
@@ -191,7 +254,7 @@ bool Aquamarine::CGBMBuffer::isSynchronous() {
 }
 
 bool Aquamarine::CGBMBuffer::good() {
-    return true;
+    return bo;
 }
 
 SDMABUFAttrs Aquamarine::CGBMBuffer::dmabuf() {
@@ -199,13 +262,13 @@ SDMABUFAttrs Aquamarine::CGBMBuffer::dmabuf() {
 }
 
 std::tuple<uint8_t*, uint32_t, size_t> Aquamarine::CGBMBuffer::beginDataPtr(uint32_t flags) {
-    uint32_t dst_stride = 0;
+    uint32_t stride = 0;
     if (boBuffer)
         allocator->backend->log(AQ_LOG_ERROR, "beginDataPtr is called a second time without calling endDataPtr first. Returning old mapping");
     else
-        boBuffer = gbm_bo_map(bo, 0, 0, attrs.size.x, attrs.size.y, flags, &dst_stride, &gboMapping);
-    // FIXME: assumes a 32-bit pixel format
-    return {(uint8_t*)boBuffer, attrs.format, attrs.size.x * attrs.size.y * 4};
+        boBuffer = gbm_bo_map(bo, 0, 0, attrs.size.x, attrs.size.y, flags, &stride, &gboMapping);
+
+    return {(uint8_t*)boBuffer, attrs.format, stride * attrs.size.y};
 }
 
 void Aquamarine::CGBMBuffer::endDataPtr() {
@@ -279,4 +342,8 @@ Hyprutils::Memory::CSharedPointer<CBackend> Aquamarine::CGBMAllocator::getBacken
 
 int Aquamarine::CGBMAllocator::drmFD() {
     return fd;
+}
+
+eAllocatorType Aquamarine::CGBMAllocator::type() {
+    return AQ_ALLOCATOR_TYPE_GBM;
 }

@@ -2,8 +2,12 @@
 
 using namespace Aquamarine;
 
+Aquamarine::IOutput::~IOutput() {
+    events.destroy.emit();
+}
+
 Hyprutils::Memory::CSharedPointer<SOutputMode> Aquamarine::IOutput::preferredMode() {
-    for (auto& m : modes) {
+    for (auto const& m : modes) {
         if (m->preferred)
             return m;
     }
@@ -11,7 +15,7 @@ Hyprutils::Memory::CSharedPointer<SOutputMode> Aquamarine::IOutput::preferredMod
     return nullptr;
 }
 
-void Aquamarine::IOutput::moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipShedule) {
+void Aquamarine::IOutput::moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipSchedule) {
     ;
 }
 

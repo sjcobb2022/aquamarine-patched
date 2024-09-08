@@ -168,7 +168,7 @@ bool Aquamarine::CWaylandBackend::dispatchEvents() {
 
     // dispatch frames
     if (backend->ready) {
-        for (auto& f : idleCallbacks) {
+        for (auto const& f : idleCallbacks) {
             f();
         }
         idleCallbacks.clear();
@@ -187,7 +187,7 @@ bool Aquamarine::CWaylandBackend::setCursor(Hyprutils::Memory::CSharedPointer<IB
 }
 
 void Aquamarine::CWaylandBackend::onReady() {
-    for (auto& o : outputs) {
+    for (auto const& o : outputs) {
         o->swapchain = CSwapchain::create(backend->primaryAllocator, self.lock());
         if (!o->swapchain) {
             backend->log(AQ_LOG_ERROR, std::format("Output {} failed: swapchain creation failed", o->name));
@@ -257,7 +257,7 @@ Aquamarine::CWaylandPointer::CWaylandPointer(SP<CCWlPointer> pointer_, Hyprutils
     pointer->setEnter([this](CCWlPointer* r, uint32_t serial, wl_proxy* surface, wl_fixed_t x, wl_fixed_t y) {
         backend->lastEnterSerial = serial;
 
-        for (auto& o : backend->outputs) {
+        for (auto const& o : backend->outputs) {
             if (o->waylandState.surface->resource() != surface)
                 continue;
 
@@ -269,7 +269,7 @@ Aquamarine::CWaylandPointer::CWaylandPointer(SP<CCWlPointer> pointer_, Hyprutils
     });
 
     pointer->setLeave([this](CCWlPointer* r, uint32_t serial, wl_proxy* surface) {
-        for (auto& o : backend->outputs) {
+        for (auto const& o : backend->outputs) {
             if (o->waylandState.surface->resource() != surface)
                 continue;
 
@@ -473,6 +473,11 @@ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::
 
     waylandState.xdgToplevel->setConfigure([this](CCXdgToplevel* r, int32_t w, int32_t h, wl_array* arr) {
         backend->backend->log(AQ_LOG_DEBUG, std::format("Output {}: configure toplevel with {}x{}", name, w, h));
+        if (w == 0 || h == 0) {
+            backend->backend->log(AQ_LOG_DEBUG, std::format("Output {}: w/h is 0, sending default hardcoded 1280x720", name));
+            w = 1280;
+            h = 720;
+        }
         events.state.emit(SStateEvent{.size = {w, h}});
         sendFrameAndSetCallback();
     });
@@ -496,6 +501,7 @@ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::
 
 Aquamarine::CWaylandOutput::~CWaylandOutput() {
     backend->idleCallbacks.clear(); // FIXME: mega hack to avoid a UAF in frame events
+    events.destroy.emit();
     if (waylandState.xdgToplevel)
         waylandState.xdgToplevel->sendDestroy();
     if (waylandState.xdgSurface)
@@ -598,7 +604,7 @@ SP<IBackendImplementation> Aquamarine::CWaylandOutput::getBackend() {
 SP<CWaylandBuffer> Aquamarine::CWaylandOutput::wlBufferFromBuffer(SP<IBuffer> buffer) {
     std::erase_if(backendState.buffers, [this](const auto& el) { return el.first.expired() || !swapchain->contains(el.first.lock()); });
 
-    for (auto& [k, v] : backendState.buffers) {
+    for (auto const& [k, v] : backendState.buffers) {
         if (k != buffer)
             continue;
 
@@ -654,7 +660,8 @@ bool Aquamarine::CWaylandOutput::setCursor(Hyprutils::Memory::CSharedPointer<IBu
     if (!buffer) {
         cursorState.cursorBuffer.reset();
         cursorState.cursorWlBuffer.reset();
-        backend->pointers.at(0)->pointer->sendSetCursor(cursorState.serial, nullptr, cursorState.hotspot.x, cursorState.hotspot.y);
+        if (!backend->pointers.empty())
+            backend->pointers.at(0)->pointer->sendSetCursor(cursorState.serial, nullptr, cursorState.hotspot.x, cursorState.hotspot.y);
         return true;
     }
 
@@ -724,7 +731,7 @@ bool Aquamarine::CWaylandOutput::setCursor(Hyprutils::Memory::CSharedPointer<IBu
     return true;
 }
 
-void Aquamarine::CWaylandOutput::moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipShedule) {
+void Aquamarine::CWaylandOutput::moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipSchedule) {
     return;
 }
 
